@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.86"
+bip39 = "2.0.0"
+bitcoin = "0.32.2"
+hex = "0.4.3"
+thiserror = "1.0.61"
