@@ -1,54 +1,81 @@
-use std::{default, str::FromStr};
-use bitcoin::{bip32::{ChildNumber, DerivationPath, Xpriv, Xpub}, key::Secp256k1, Address, Network, PrivateKey, PublicKey, CompressedPublicKey};
-use crate::errors::{AccountError, Result};
-use super::address_type::{self, AddressType};
-use bip39::{Mnemonic, Language};
-use bitcoin::hex::DisplayHex;
+use std::str::FromStr;
+
+use bip39::{Language, Mnemonic};
+use bitcoin::{
+    Address,
+    bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
+    CompressedPublicKey, key::Secp256k1, Network, PrivateKey, PublicKey,
+};
 use bitcoin::key::UntweakedPublicKey;
-use bitcoin::secp256k1::SecretKey;
+
+use crate::errors::{AccountError, Result};
+
+use super::address_type::AddressType;
 
 #[derive(Debug)]
 pub struct Account {
-    pub address:Address,
-    pub wif_private_key:String,
+    pub address: Address,
+    pub wif_private_key: String,
     pub public_key: PublicKey,
-    pub xpub:Xpub,
-    pub xpriv:Xpriv,
-    pub hd_path:DerivationPath  
+    pub xpub: Xpub,
+    pub xpriv: Xpriv,
+    pub hd_path: DerivationPath,
 }
 
 impl Account {
-
-    pub fn from_random(address_type: AddressType, network:Network) -> Result<Account> {
-        let mnemonic = Mnemonic::generate_in(Language::English, 12).map_err(|_| AccountError::InvalidMnemonic)?;
-        Account::from_mnemonic(network,mnemonic.to_string().as_str(), address_type)
+    pub fn from_random(address_type: AddressType, network: Network) -> Result<Account> {
+        let mnemonic = Mnemonic::generate_in(Language::English, 12)
+            .map_err(|_| AccountError::InvalidMnemonic)?;
+        Account::from_mnemonic(network, mnemonic.to_string().as_str(), address_type, None)
     }
 
-    pub fn from_mnemonic(network:Network, mnemonic:&str, account_type: AddressType) -> Result<Account> {
-
+    pub fn from_mnemonic(
+        network: Network,
+        mnemonic: &str,
+        account_type: AddressType,
+        path: Option<[u32; 2]>,
+    ) -> Result<Account> {
         let mnemonic = Mnemonic::from_str(mnemonic).map_err(|_| AccountError::InvalidMnemonic)?;
 
         let seed = mnemonic.to_seed("");
 
-        let root = Xpriv::new_master(network, &seed).map_err(|e| AccountError::Other(e.to_string()))?;
-
+        let root =
+            Xpriv::new_master(network, &seed).map_err(|e| AccountError::Other(e.to_string()))?;
 
         // derive the account xpriv
         let secp256k1 = Secp256k1::new();
-        let hd_path = DerivationPath::from_str(account_type.default_path()).map_err(|_| AccountError::InvalidHDPath(account_type.default_path().to_string()))?;
-        let xpriv = root.derive_priv(&secp256k1, &hd_path).map_err(|e| AccountError::Other(e.to_string()))?;
+        // 3 levels pathh
+        let hd_path = DerivationPath::from_str(account_type.default_path())
+            .map_err(|_| AccountError::InvalidHDPath(account_type.default_path().to_string()))?;
+        let xpriv = root
+            .derive_priv(&secp256k1, &hd_path)
+            .map_err(|e| AccountError::Other(e.to_string()))?;
         let xpub = Xpub::from_priv(&secp256k1, &xpriv);
 
         // derive the account from xpriv or xpub
-        let zero = ChildNumber::from_normal_idx(0).map_err(|e| AccountError::Other(e.to_string()))?;
-        let public_key = xpub.derive_pub(&secp256k1, &[zero, zero]).map_err(|e| AccountError::Other(e.to_string()))?.public_key;
+        let path = path.unwrap_or([0, 0]);
+        let first = ChildNumber::from_normal_idx(path[0])
+            .map_err(|e| AccountError::Other(e.to_string()))?;
+        let second = ChildNumber::from_normal_idx(path[1])
+            .map_err(|e| AccountError::Other(e.to_string()))?;
 
-        let private_key = xpriv.derive_priv(&secp256k1, &[zero, zero]).map_err(|e| AccountError::Other(e.to_string()))?.private_key;
+        // path
+        let path = [first, second];
+
+        let public_key = xpub
+            .derive_pub(&secp256k1, &path)
+            .map_err(|e| AccountError::Other(e.to_string()))?
+            .public_key;
+
+        let private_key = xpriv
+            .derive_priv(&secp256k1, &path)
+            .map_err(|e| AccountError::Other(e.to_string()))?
+            .private_key;
         // convert the hex private key to wif format
         let wif_private_key = PrivateKey::new(private_key, network).to_wif();
 
         let public_key = PublicKey::new(public_key);
-        let address =  match account_type {
+        let address = match account_type {
             AddressType::P2PKH => Address::p2pkh(&public_key, network),
             AddressType::P2SH_P2WPKH => {
                 let compressed = CompressedPublicKey(public_key.inner);
@@ -57,35 +84,42 @@ impl Account {
             AddressType::P2WPKH => {
                 let compressed = CompressedPublicKey(public_key.inner);
                 Address::p2wpkh(&compressed, network)
-            },
+            }
             AddressType::P2TR => {
                 let untweaked_public_key = public_key.inner;
-                Address::p2tr(&secp256k1, UntweakedPublicKey::from(untweaked_public_key), None, network)
-            },
-            _ => Address::p2pkh(&public_key, network)
+                Address::p2tr(
+                    &secp256k1,
+                    UntweakedPublicKey::from(untweaked_public_key),
+                    None,
+                    network,
+                )
+            }
+            _ => Address::p2pkh(&public_key, network),
         };
 
-        Ok(
-            Account {
-                address,
-                xpub:xpub,
-                xpriv:xpriv,
-                wif_private_key:wif_private_key,
-                public_key: public_key,
-                hd_path,
-            }
-        )
+        Ok(Account {
+            address,
+            xpub: xpub,
+            xpriv: xpriv,
+            wif_private_key: wif_private_key,
+            public_key: public_key,
+            hd_path,
+        })
     }
 }
 
 #[cfg(test)]
-mod tests{
+mod tests {
     use super::*;
+
     #[test]
     fn test_derive_account_from_mnemonic() {
         // THERE IS NO FUCKING ASSETS ! SO DONT STEAL MONEY !
-        let test_mnemoic = "wish film peasant much sure thought speed print napkin hard crumble envelope";
-        let account = Account::from_mnemonic(Network::Bitcoin, test_mnemoic, AddressType::P2PKH).unwrap();
+        let test_mnemoic =
+            "wish film peasant much sure thought speed print napkin hard crumble envelope";
+        let account =
+            Account::from_mnemonic(Network::Bitcoin, test_mnemoic, AddressType::P2PKH, None)
+                .unwrap();
 
         // assert eq
         assert_eq!(
@@ -112,12 +146,14 @@ mod tests{
         );
     }
 
-
     #[test]
     fn test_derive_account_from_mnemonic_bip84() {
         // THERE IS NO FUCKING ASSETS ! SO DONT STEAL MONEY !
-        let test_mnemoic = "wish film peasant much sure thought speed print napkin hard crumble envelope";
-        let account = Account::from_mnemonic(Network::Bitcoin, test_mnemoic, AddressType::P2WPKH).unwrap();
+        let test_mnemoic =
+            "wish film peasant much sure thought speed print napkin hard crumble envelope";
+        let account =
+            Account::from_mnemonic(Network::Bitcoin, test_mnemoic, AddressType::P2WPKH, None)
+                .unwrap();
 
         assert_eq!(
             "bc1qvgsr2jt7wzxcalv82045rzd9ed8pxljdwck269".to_string(),
@@ -133,12 +169,14 @@ mod tests{
         );
     }
 
-
     #[test]
     fn test_derive_account_from_mnemonic_taproot() {
         // THERE IS NO FUCKING ASSETS ! SO DONT STEAL MONEY !
-        let test_mnemoic = "wish film peasant much sure thought speed print napkin hard crumble envelope";
-        let account = Account::from_mnemonic(Network::Bitcoin, test_mnemoic, AddressType::P2TR).unwrap();
+        let test_mnemoic =
+            "wish film peasant much sure thought speed print napkin hard crumble envelope";
+        let account =
+            Account::from_mnemonic(Network::Bitcoin, test_mnemoic, AddressType::P2TR, None)
+                .unwrap();
 
         assert_eq!(
             "bc1pvtta6s57eza05pd5xjnnrzya6qxw5ua5d2strh3wss5yla7qytsqdzp5d2".to_string(),
@@ -153,7 +191,6 @@ mod tests{
             account.wif_private_key
         );
     }
-
 
     #[test]
     fn test_from_random() {
